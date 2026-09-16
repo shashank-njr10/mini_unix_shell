@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 
 #include "executor.h"
+#include "jobs.h"
 
 /* Points the child's stdin/stdout at the files named by '<', '>' or
  * '>>', if any were given for this command.
@@ -126,6 +127,16 @@ void run_pipeline(pipeline_t *pl) {
      * waiting for more input forever. */
     for (int j = 0; j < 2 * (nstages - 1); j++) {
         close(pipefds[j]);
+    }
+
+    if (pl->background) {
+        /* Don't wait: hand the pipeline's pids to the job list and
+         * give the prompt straight back. jobs_reap() (called from the
+         * main loop before each prompt) will notice later, from the
+         * shell's normal flow, when this job's processes finish. */
+        job_t *job = jobs_add(pids, nstages, pl->raw_line);
+        printf("[%d] %d\n", job->id, pids[nstages - 1]);
+        return;
     }
 
     /* Concept: waitpid() blocks the shell until the given child

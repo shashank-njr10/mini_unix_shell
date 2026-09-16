@@ -14,11 +14,12 @@ typedef struct {
     int append;     /* 1 for '>>' (append), 0 for '>' (truncate/overwrite) */
 } command_t;
 
-/* A pipeline is one or more commands. Right now every pipeline has
- * exactly one stage; pipe support ('|') is added in a later step. */
+/* A pipeline is one or more commands connected by '|'. */
 typedef struct {
     command_t *stages;
     int nstages;
+    int background;  /* 1 if the line ended in '&' (run without waiting) */
+    char *raw_line;  /* original input line, kept for `jobs` output */
 } pipeline_t;
 
 #endif

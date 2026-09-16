@@ -60,6 +60,28 @@ pipeline_t *parse_line(char *line) {
     while (*probe == ' ' || *probe == '\t') probe++;
     if (*probe == '\0') return NULL;
 
+    /* Keep an untouched copy of the line (post newline-strip) before
+     * we start cutting it up below -- this is what shows up in
+     * `jobs` output for background jobs, since by the time we're done
+     * parsing, the original buffer has been split into pieces with
+     * embedded NUL bytes and can't be printed as-is. */
+    char *raw_copy = strdup(line);
+
+    /* A trailing '&' means "run this pipeline in the background and
+     * give me the prompt back immediately instead of waiting for it
+     * to finish." Detect and strip it (plus any whitespace around it)
+     * before tokenizing, so it never ends up mistaken for a program
+     * argument. */
+    int background = 0;
+    size_t end = strlen(line);
+    while (end > 0 && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+    if (end > 0 && line[end - 1] == '&') {
+        background = 1;
+        end--;
+        while (end > 0 && (line[end - 1] == ' ' || line[end - 1] == '\t')) end--;
+        line[end] = '\0';
+    }
+
     /* Split the line on '|' first, into up to MAX_STAGES raw stage
      * strings, before tokenizing each stage individually. A pipeline
      * like "ls -l | grep foo | wc -l" becomes three stages here.
@@ -75,8 +97,16 @@ pipeline_t *parse_line(char *line) {
         stage = strtok_r(NULL, "|", &saveptr);
     }
 
+    if (nstages == 0) {
+        /* e.g. the user typed just "&" -- nothing left to run. */
+        free(raw_copy);
+        return NULL;
+    }
+
     pipeline_t *pl = malloc(sizeof(pipeline_t));
     pl->nstages = nstages;
+    pl->background = background;
+    pl->raw_line = raw_copy;
     pl->stages = malloc(sizeof(command_t) * nstages);
 
     for (int i = 0; i < nstages; i++) {
@@ -108,5 +138,6 @@ void free_pipeline(pipeline_t *pl) {
         free(pl->stages[i].argv);
     }
     free(pl->stages);
+    free(pl->raw_line);
     free(pl);
 }
