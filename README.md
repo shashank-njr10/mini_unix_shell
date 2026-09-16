@@ -23,6 +23,22 @@ make
 ./mini_shell
 ```
 
+## Tests
+
+```sh
+make test
+```
+
+Two suites, because Ctrl-C/Ctrl-Z genuinely need a real terminal:
+
+- `tests/run_tests.sh` -- feeds command lines into mini_shell's piped
+  stdin and checks the output/files/exit status, covering execution,
+  redirection, pipelines, background jobs, and builtins.
+- `tests/test_signals.py` -- opens a pseudo-terminal (pty) and sends
+  actual Ctrl-C/Ctrl-Z bytes, since that's the only way to trigger the
+  terminal driver's SIGINT/SIGTSTP delivery that job control depends
+  on; piped stdin never goes through a terminal driver at all.
+
 ## Layout
 
 | File | Responsibility |
