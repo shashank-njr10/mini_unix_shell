@@ -44,6 +44,8 @@ static void tokenize(char *text, command_t *cmd) {
     cmd->argv = argv;
 }
 
+#define MAX_STAGES 16
+
 pipeline_t *parse_line(char *line) {
     /* getline() (used by main.c) leaves the trailing '\n' on the
      * string; strip it so it doesn't end up as part of the last
@@ -58,20 +60,43 @@ pipeline_t *parse_line(char *line) {
     while (*probe == ' ' || *probe == '\t') probe++;
     if (*probe == '\0') return NULL;
 
-    pipeline_t *pl = malloc(sizeof(pipeline_t));
-    pl->nstages = 1;
-    pl->stages = malloc(sizeof(command_t));
-    tokenize(line, &pl->stages[0]);
+    /* Split the line on '|' first, into up to MAX_STAGES raw stage
+     * strings, before tokenizing each stage individually. A pipeline
+     * like "ls -l | grep foo | wc -l" becomes three stages here.
+     * Concept: strtok_r() is used again, with '|' as the delimiter
+     * this time, kept separate from the whitespace-tokenizing pass
+     * inside tokenize() via its own saveptr. */
+    char *stage_text[MAX_STAGES];
+    int nstages = 0;
+    char *saveptr;
+    char *stage = strtok_r(line, "|", &saveptr);
+    while (stage != NULL && nstages < MAX_STAGES) {
+        stage_text[nstages++] = stage;
+        stage = strtok_r(NULL, "|", &saveptr);
+    }
 
-    /* Defensive check: if tokenizing somehow produced no argv[0]
-     * (e.g. a line of only separator characters), treat it the same
-     * as a blank line instead of handing the executor an empty
-     * command. */
-    if (pl->stages[0].argv[0] == NULL) {
-        free(pl->stages[0].argv);
-        free(pl->stages);
-        free(pl);
-        return NULL;
+    pipeline_t *pl = malloc(sizeof(pipeline_t));
+    pl->nstages = nstages;
+    pl->stages = malloc(sizeof(command_t) * nstages);
+
+    for (int i = 0; i < nstages; i++) {
+        tokenize(stage_text[i], &pl->stages[i]);
+
+        /* Defensive check: an empty stage (e.g. "ls || wc", or a
+         * trailing '|' with nothing after it) tokenizes to no argv[0]
+         * at all. That's a malformed pipeline, so bail out cleanly
+         * instead of handing the executor a command with no program
+         * to run. */
+        if (pl->stages[i].argv[0] == NULL) {
+            fprintf(stderr, "mini_shell: syntax error: empty command near '|'\n");
+            /* Only stages [0..i] have been tokenized (and so only
+             * they have a real argv to free) -- tell free_pipeline()
+             * to stop there instead of walking into uninitialized
+             * memory for the stages we never got to. */
+            pl->nstages = i + 1;
+            free_pipeline(pl);
+            return NULL;
+        }
     }
 
     return pl;
