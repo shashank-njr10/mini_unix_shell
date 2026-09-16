@@ -5,10 +5,17 @@
 #include "executor.h"
 #include "builtins.h"
 #include "jobs.h"
+#include "signals.h"
 
 int main(void) {
     char *line = NULL; /* getline() manages this buffer for us */
     size_t cap = 0;
+
+    /* Sets up process-group-based job control (see signals.c): makes
+     * the shell the terminal's foreground process group and makes it
+     * ignore SIGINT/SIGTSTP itself, so those signals go to whichever
+     * job run_pipeline() puts in the foreground instead. */
+    init_job_control();
 
     while (1) {
         /* Check whether any background job finished since the last

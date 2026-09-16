@@ -7,6 +7,7 @@
 
 #include "executor.h"
 #include "jobs.h"
+#include "signals.h"
 
 /* Points the child's stdin/stdout at the files named by '<', '>' or
  * '>>', if any were given for this command.
@@ -44,6 +45,16 @@ void run_pipeline(pipeline_t *pl) {
     int nstages = pl->nstages;
     pid_t pids[nstages];
 
+    /* Concept: process groups. Every process in a pipeline is put
+     * into the *same* process group (pgid == the first stage's pid),
+     * so the whole pipeline can be treated as one unit -- the
+     * terminal driver delivers Ctrl-C/Ctrl-Z to every process in
+     * whichever group currently owns the terminal, and waitpid()
+     * below can wait on all of them without needing a separate signal
+     * handler per process. `pgid` starts at 0 and gets set to the
+     * first child's pid once that child exists. */
+    pid_t pgid = 0;
+
     /* Concept: pipe() creates one kernel pipe -- a pair of file
      * descriptors where pipefds[2*i] is the read end and
      * pipefds[2*i+1] is the write end. For N pipeline stages we need
@@ -72,6 +83,32 @@ void run_pipeline(pipeline_t *pl) {
 
         if (pid == 0) {
             /* --- Child process for stage i --- */
+
+            /* Join this pipeline's process group (creating it, if
+             * this is the first stage). Both the child and the parent
+             * make this same setpgid() call (see below) -- that's a
+             * deliberate race-safety pattern: whichever of the two
+             * runs first "wins", but either way the group membership
+             * is guaranteed to be in place before anyone relies on it
+             * (e.g. before tcsetpgrp() hands the terminal to this
+             * group). Errors are ignored here since a harmless race
+             * (the parent already did it) is the most likely cause. */
+            pid_t my_pgid = (i == 0) ? getpid() : pgid;
+            setpgid(0, my_pgid);
+
+            /* Give this pipeline's process group the terminal, so the
+             * terminal driver routes Ctrl-C/Ctrl-Z to it instead of
+             * the shell -- but only for a foreground pipeline; a
+             * backgrounded one must NOT take over the terminal. */
+            if (shell_is_interactive && !pl->background) {
+                tcsetpgrp(shell_terminal, my_pgid);
+            }
+
+            /* Undo the shell's SIG_IGN for these signals so the
+             * program about to run via execvp() reacts to Ctrl-C /
+             * Ctrl-Z the normal way, instead of silently ignoring
+             * them like the shell process itself does. */
+            child_reset_signals();
 
             /* Wire this stage's stdin to the previous pipe's read end
              * (every stage except the first reads from a pipe), and
@@ -118,6 +155,14 @@ void run_pipeline(pipeline_t *pl) {
 
         /* --- Parent process (the shell itself) --- */
         pids[i] = pid;
+        if (i == 0) pgid = pid;
+        /* Mirrors the child's setpgid() call above -- see the comment
+         * there for why both sides do this. */
+        setpgid(pid, pgid);
+    }
+
+    if (shell_is_interactive && !pl->background) {
+        tcsetpgrp(shell_terminal, pgid);
     }
 
     /* The parent never reads or writes these pipes itself -- only the
@@ -134,18 +179,41 @@ void run_pipeline(pipeline_t *pl) {
          * give the prompt straight back. jobs_reap() (called from the
          * main loop before each prompt) will notice later, from the
          * shell's normal flow, when this job's processes finish. */
-        job_t *job = jobs_add(pids, nstages, pl->raw_line);
+        job_t *job = jobs_add(pids, nstages, pl->raw_line, JOB_RUNNING);
         printf("[%d] %d\n", job->id, pids[nstages - 1]);
         return;
     }
 
-    /* Concept: waitpid() blocks the shell until the given child
-     * changes state (here, until it exits), and reports the child's
-     * exit status back through `status`. Waiting on every stage here
-     * is what makes the shell run one pipeline at a time instead of
-     * racing ahead to print the next prompt before it's done. */
+    /* Concept: waitpid(pid, &status, WUNTRACED) blocks until the
+     * given child either exits or is *stopped* by a signal (like the
+     * SIGTSTP that Ctrl-Z sends to the foreground process group).
+     * Without WUNTRACED, waitpid() would ignore a stop and keep
+     * blocking, leaving the shell hung waiting for a job the user
+     * just suspended. Waiting on every stage here is also what makes
+     * the shell run one pipeline at a time instead of racing ahead to
+     * print the next prompt before it's done. */
     int status;
+    int stopped = 0;
     for (int i = 0; i < nstages; i++) {
-        waitpid(pids[i], &status, 0);
+        waitpid(pids[i], &status, WUNTRACED);
+        if (WIFSTOPPED(status)) {
+            stopped = 1;
+        }
+    }
+
+    /* Whether the job finished or was stopped, the shell needs the
+     * terminal back so it can read the next line the user types. */
+    if (shell_is_interactive) {
+        tcsetpgrp(shell_terminal, shell_pgid);
+    }
+
+    if (stopped) {
+        /* Ctrl-Z: the job is paused, not dead. Track it so `jobs`
+         * shows it and its processes aren't left as untracked
+         * zombies-in-waiting once they eventually do exit. This
+         * shell doesn't implement `fg`/`bg` to resume it (out of
+         * scope here) -- it's simply reported as stopped. */
+        job_t *job = jobs_add(pids, nstages, pl->raw_line, JOB_STOPPED);
+        printf("\n[%d]+  Stopped\t\t%s\n", job->id, pl->raw_line);
     }
 }
