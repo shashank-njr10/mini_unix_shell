@@ -1,0 +1,4 @@
+mini_shell
+src/*.o
+*.o
+.DS_Store
