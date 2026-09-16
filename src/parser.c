@@ -6,24 +6,42 @@
 
 #define MAX_ARGS 64
 
-/* Splits `text` on whitespace into a NULL-terminated argv array.
+/* Splits `text` on whitespace into tokens and sorts them into `cmd`:
+ * plain words go into argv, while '<', '>' and '>>' are recognized as
+ * redirection operators whose *next* token is a filename rather than
+ * an argument to the program.
  * Concept: strtok_r() walks through a string, handing back one token
  * at a time and remembering its position in `saveptr` between calls.
  * We use the "_r" (reentrant) form instead of plain strtok() so that
  * later, when we tokenize several pipeline stages in nested loops,
  * one call can't clobber another's progress. */
-static char **tokenize(char *text) {
+static void tokenize(char *text, command_t *cmd) {
     char **argv = malloc(sizeof(char *) * MAX_ARGS);
     int argc = 0;
+
+    cmd->infile = NULL;
+    cmd->outfile = NULL;
+    cmd->append = 0;
 
     char *saveptr;
     char *tok = strtok_r(text, " \t", &saveptr);
     while (tok != NULL && argc < MAX_ARGS - 1) {
-        argv[argc++] = tok;
+        if (strcmp(tok, "<") == 0) {
+            tok = strtok_r(NULL, " \t", &saveptr);
+            if (tok != NULL) cmd->infile = tok;
+        } else if (strcmp(tok, ">>") == 0) {
+            tok = strtok_r(NULL, " \t", &saveptr);
+            if (tok != NULL) { cmd->outfile = tok; cmd->append = 1; }
+        } else if (strcmp(tok, ">") == 0) {
+            tok = strtok_r(NULL, " \t", &saveptr);
+            if (tok != NULL) { cmd->outfile = tok; cmd->append = 0; }
+        } else {
+            argv[argc++] = tok;
+        }
         tok = strtok_r(NULL, " \t", &saveptr);
     }
     argv[argc] = NULL; /* execvp() needs this NULL terminator */
-    return argv;
+    cmd->argv = argv;
 }
 
 pipeline_t *parse_line(char *line) {
@@ -43,7 +61,7 @@ pipeline_t *parse_line(char *line) {
     pipeline_t *pl = malloc(sizeof(pipeline_t));
     pl->nstages = 1;
     pl->stages = malloc(sizeof(command_t));
-    pl->stages[0].argv = tokenize(line);
+    tokenize(line, &pl->stages[0]);
 
     /* Defensive check: if tokenizing somehow produced no argv[0]
      * (e.g. a line of only separator characters), treat it the same

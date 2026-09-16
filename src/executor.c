@@ -2,9 +2,42 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 
 #include "executor.h"
+
+/* Points the child's stdin/stdout at the files named by '<', '>' or
+ * '>>', if any were given for this command.
+ * Concept: open() gives us a fresh file descriptor for the file;
+ * dup2(fd, STDIN_FILENO) / dup2(fd, STDOUT_FILENO) then makes that
+ * descriptor take over slot 0 (stdin) or slot 1 (stdout), so anything
+ * the program reads/writes via stdin/stdout actually goes to the
+ * file instead of the terminal. Must run in the child, after fork()
+ * but before execvp(), since it permanently rewires this process's
+ * file descriptors. */
+static void apply_redirection(command_t *cmd) {
+    if (cmd->infile) {
+        int fd = open(cmd->infile, O_RDONLY);
+        if (fd < 0) {
+            perror(cmd->infile);
+            _exit(1);
+        }
+        dup2(fd, STDIN_FILENO);
+        close(fd);
+    }
+
+    if (cmd->outfile) {
+        int flags = O_WRONLY | O_CREAT | (cmd->append ? O_APPEND : O_TRUNC);
+        int fd = open(cmd->outfile, flags, 0644);
+        if (fd < 0) {
+            perror(cmd->outfile);
+            _exit(1);
+        }
+        dup2(fd, STDOUT_FILENO);
+        close(fd);
+    }
+}
 
 void run_pipeline(pipeline_t *pl) {
     /* Concept: fork() clones the running process into two copies that
@@ -20,6 +53,8 @@ void run_pipeline(pipeline_t *pl) {
 
     if (pid == 0) {
         /* --- Child process --- */
+        apply_redirection(&pl->stages[0]);
+
         /* Concept: execvp() replaces this process's program code with
          * the requested command, searching the directories in $PATH
          * to find it (the "p" in execvp). If it succeeds it never
